@@ -6,7 +6,6 @@
 #     nuitka-project: --output-filename=videocr-cli
 # nuitka-project-if: {OS} == "Linux":
 #     nuitka-project: --output-filename=videocr-cli.bin
-
 # Windows-specific metadata for the executable
 # nuitka-project-if: {OS} == "Windows":
 #     nuitka-project-set: APP_VERSION = (__import__("sys").path.insert(0, "..") or __import__("_version").__version__)
@@ -19,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 from contextlib import nullcontext
@@ -30,60 +30,92 @@ from videocr import save_subtitles_to_file, utils
 from videocr.lang_dictionaries import GOOGLE_LENS_LANGS, PADDLEOCR_LANGS
 
 
-# custom validators for argparse
+# Custom validators for argparse
 def valid_video_path(arg: str) -> str:
     if not os.path.isfile(arg):
-        raise argparse.ArgumentTypeError(f"Video file does not exist or is not a valid file: '{arg}'")
+        raise argparse.ArgumentTypeError(
+            f"Video file does not exist or is not a valid file: '{arg}'"
+        )
     return arg
 
 
 def valid_output_path(arg: str) -> str:
     dir_name = os.path.dirname(arg) or '.'
     if not os.path.isdir(dir_name):
-        raise argparse.ArgumentTypeError(f"Output directory does not exist: '{dir_name}'")
+        raise argparse.ArgumentTypeError(
+            f"Output directory does not exist: '{dir_name}'"
+        )
     if not os.access(dir_name, os.W_OK):
-        raise argparse.ArgumentTypeError(f"Output directory is not writable: '{dir_name}'")
+        raise argparse.ArgumentTypeError(
+            f"Output directory is not writable: '{dir_name}'"
+        )
     return arg
 
 
 def valid_output_dir_path(arg: str) -> str:
     if os.path.exists(arg) and not os.path.isdir(arg):
-        raise argparse.ArgumentTypeError(f"Path exists and is not a directory: '{arg}'")
+        raise argparse.ArgumentTypeError(
+            f"Path exists and is not a directory: '{arg}'"
+        )
     parent_dir = os.path.dirname(os.path.abspath(arg)) or '.'
     if not os.path.isdir(parent_dir):
-        raise argparse.ArgumentTypeError(f"Parent directory does not exist: '{parent_dir}'")
+        raise argparse.ArgumentTypeError(
+            f"Parent directory does not exist: '{parent_dir}'"
+        )
     if not os.access(parent_dir, os.W_OK):
-        raise argparse.ArgumentTypeError(f"Parent directory is not writable: '{parent_dir}'")
+        raise argparse.ArgumentTypeError(
+            f"Parent directory is not writable: '{parent_dir}'"
+        )
     return arg
 
 
-def restricted_int(min_val: int | None = None, max_val: int | None = None) -> Callable[[str], int]:
+def restricted_int(
+    min_val: int | None = None,
+    max_val: int | None = None,
+) -> Callable[[str], int]:
     def validator(arg: str) -> int:
         try:
             value = int(arg)
         except ValueError:
-            raise argparse.ArgumentTypeError(f"Must be an integer. Got '{arg}'") from None
-
+            raise argparse.ArgumentTypeError(
+                f"Must be an integer. Got '{arg}'"
+            ) from None
         if min_val is not None and value < min_val:
-            raise argparse.ArgumentTypeError(f"Value must be >= {min_val}")
+            raise argparse.ArgumentTypeError(
+                f"Value must be >= {min_val}"
+            )
         if max_val is not None and value > max_val:
-            raise argparse.ArgumentTypeError(f"Value must be <= {max_val}")
+            raise argparse.ArgumentTypeError(
+                f"Value must be <= {max_val}"
+            )
         return value
+
     return validator
 
 
-def restricted_float(min_val: float | None = None, max_val: float | None = None) -> Callable[[str], float]:
+def restricted_float(
+    min_val: float | None = None,
+    max_val: float | None = None,
+) -> Callable[[str], float]:
     def validator(arg: str) -> float:
         try:
             value = float(arg)
         except ValueError:
-            raise argparse.ArgumentTypeError(f"Must be a decimal number. Got '{arg}'") from None
+            raise argparse.ArgumentTypeError(
+                f"Must be a decimal number. Got '{arg}'"
+            ) from None
+
+        if not math.isfinite(value):
+            raise argparse.ArgumentTypeError(
+                "Must be a finite decimal number."
+            )
 
         if min_val is not None and value < min_val:
-            raise argparse.ArgumentTypeError(f"Value must be >= {min_val}")
-        if max_val is not None and value > max_val:
-            raise argparse.ArgumentTypeError(f"Value must be <= {max_val}")
+            raise argparse.ArgumentTypeError(
+                f"Value must be <= {max_val}"
+            )
         return value
+
     return validator
 
 
@@ -94,7 +126,9 @@ def valid_time_string(arg: str) -> str:
         utils.get_ms_from_time_str(arg)
         return arg
     except ValueError:
-        raise argparse.ArgumentTypeError(f"Invalid time format '{arg}'. Use MM:SS or HH:MM:SS.") from None
+        raise argparse.ArgumentTypeError(
+            f"Invalid time format '{arg}'. Use MM:SS or HH:MM:SS."
+        ) from None
 
 
 def valid_alignment_name(arg: str) -> str | None:
@@ -102,35 +136,185 @@ def valid_alignment_name(arg: str) -> str | None:
         return None
     if arg in utils.VALID_ALIGNMENT_NAMES:
         return utils.ALIGNMENT_MAP[arg]
-    allowed_values = ", ".join(sorted(list(utils.VALID_ALIGNMENT_NAMES)))
-    raise argparse.ArgumentTypeError(f"Invalid alignment '{arg}'. Allowed values are: {allowed_values}")
+    allowed_values = ", ".join(sorted(utils.VALID_ALIGNMENT_NAMES))
+    raise argparse.ArgumentTypeError(
+        f"Invalid alignment '{arg}'. Allowed values are: {allowed_values}"
+    )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description='Extract subtitles from a video using PaddleOCR or Google Lens.')
+    parser = argparse.ArgumentParser(
+        description='Extract subtitles from a video using PaddleOCR or Google Lens.'
+    )
 
-    parser.add_argument('--video_path', type=valid_video_path, required=True, help='Path to the video file')
-    parser.add_argument('--output', type=valid_output_path, default='subtitle.srt', help='Output SRT file path (default: subtitle.srt)')
-    parser.add_argument('--ocr_engine', type=str, choices=['paddleocr', 'google_lens'], default='paddleocr', help='OCR engine to use in the recognition step (default: paddleocr)')
-    parser.add_argument('--lang', type=str, default='en', help='OCR language code (default: en)')
-    parser.add_argument('--time_start', type=valid_time_string, default='0:00', help='Start time (MM:SS or HH:MM:SS)')
-    parser.add_argument('--time_end', type=valid_time_string, default='', help='End time (MM:SS or HH:MM:SS)')
-    parser.add_argument('--conf_threshold', type=restricted_int(0, 100), default=75, help='Confidence threshold (PaddleOCR only, default: 75)')
-    parser.add_argument('--sim_threshold', type=restricted_int(0, 100), default=80, help='Similarity threshold (default: 80)')
-    parser.add_argument('--max_merge_gap', type=restricted_float(min_val=0.0), default=0.1, help='Maximum time gap in seconds to merge similar subtitles (default: 0.1)')
-    parser.add_argument('--use_fullframe', type=lambda x: x.lower() == 'true', default=False, help='Use full frame for OCR (default: false)')
-    parser.add_argument('--use_gpu', type=lambda x: x.lower() == 'true', default=False, help='Enable GPU usage (default: false)')
-    parser.add_argument('--use_angle_cls', type=lambda x: x.lower() == 'true', default=False, help='Enable Classification (PaddleOCR only, default: false)')
-    parser.add_argument('--use_server_model', type=lambda x: x.lower() == 'true', default=False, help='Enable usage of server model (default: false)')
-    parser.add_argument('--brightness_threshold', type=restricted_int(0, 255), default=None, help='Brightness threshold')
-    parser.add_argument('--ssim_threshold', type=restricted_int(0, 100), default=94, help='SSIM similarity threshold for initial frame filtering in Step 1 (default: 94)')
-    parser.add_argument('--subtitle_position', type=str, choices=['center', 'left', 'right', 'any'], default='center', help='Subtitle position alignment (default: center)')
-    parser.add_argument('--frames_to_skip', type=restricted_int(min_val=0), default=1, help='Frames to skip (default: 1)')
-    parser.add_argument('--normalize_to_simplified_chinese', type=lambda x: x.lower() == 'true', default=True, help='Normalize Traditional Chinese characters to Simplified Chinese (default: true)')
-    parser.add_argument('--post_processing', type=lambda x: x.lower() == 'true', default=False, help='Enable post processing of subtitles (default: false)')
-    parser.add_argument('--min_subtitle_duration', type=restricted_float(min_val=0.0), default=0.2, help='Minimum subtitle duration in seconds (default: 0.2)')
-    parser.add_argument('--ocr_image_max_width', type=restricted_int(min_val=1), default=720, help='Maximum image width used for OCR (default: 720)')
-    parser.add_argument('--disable_stitching', type=lambda x: x.lower() == 'true', default=False, help='Disable frame stitching for the detection pass, processing one frame at a time for maximum accuracy at the cost of speed (default: false)')
+    parser.add_argument(
+        '--video_path',
+        type=valid_video_path,
+        required=True,
+        help='Path to the video file',
+    )
+    parser.add_argument(
+        '--output',
+        type=valid_output_path,
+        default=None,
+        help='Output subtitle file path. Defaults to subtitle.srt or subtitle.ass depending on --subtitle_format',
+    )
+    parser.add_argument(
+        '--subtitle_format',
+        choices=['srt', 'ass'],
+        default='srt',
+        help='Output subtitle format (default: srt)',
+    )
+    parser.add_argument(
+        '--preserve_position',
+        type=lambda x: x.lower() == 'true',
+        default=True,
+        help='Preserve recognized text positions in ASS: true or false (default: true)',
+    )
+
+    parser.add_argument(
+        '--preserve_color',
+        type=lambda x: x.lower() == 'true',
+        default=False,
+        help='Approximate original text color in ASS: true or false (default: false)',
+    )
+
+    parser.add_argument(
+        '--red_white_threshold_percent',
+        type=restricted_float(0.0, 100.0),
+        default=None,
+        help='Optional personal red protection threshold, in percent',
+    )
+
+    parser.add_argument(
+        '--white_protection_strength',
+        type=restricted_float(0.0, 100.0),
+        default=None,
+        help='White-text protection strength from 0 to 100; omitted means disabled',
+    )
+    parser.add_argument(
+        '--ocr_engine',
+        type=str,
+        choices=['paddleocr', 'google_lens'],
+        default='paddleocr',
+        help='OCR engine to use in the recognition step (default: paddleocr)',
+    )
+    parser.add_argument(
+        '--lang',
+        type=str,
+        default='en',
+        help='OCR language code (default: en)',
+    )
+    parser.add_argument(
+        '--time_start',
+        type=valid_time_string,
+        default='0:00',
+        help='Start time (MM:SS or HH:MM:SS)',
+    )
+    parser.add_argument(
+        '--time_end',
+        type=valid_time_string,
+        default='',
+        help='End time (MM:SS or HH:MM:SS)',
+    )
+    parser.add_argument(
+        '--conf_threshold',
+        type=restricted_int(0, 100),
+        default=75,
+        help='Confidence threshold (PaddleOCR only, default: 75)',
+    )
+    parser.add_argument(
+        '--sim_threshold',
+        type=restricted_int(0, 100),
+        default=80,
+        help='Similarity threshold (default: 80)',
+    )
+    parser.add_argument(
+        '--max_merge_gap',
+        type=restricted_float(min_val=0.0),
+        default=0.1,
+        help='Maximum time gap in seconds to merge similar subtitles (default: 0.1)',
+    )
+    parser.add_argument(
+        '--use_fullframe',
+        type=lambda x: x.lower() == 'true',
+        default=False,
+        help='Use full frame for OCR (default: false)',
+    )
+    parser.add_argument(
+        '--use_gpu',
+        type=lambda x: x.lower() == 'true',
+        default=False,
+        help='Enable GPU usage (default: false)',
+    )
+    parser.add_argument(
+        '--use_angle_cls',
+        type=lambda x: x.lower() == 'true',
+        default=False,
+        help='Enable Classification (PaddleOCR only, default: false)',
+    )
+    parser.add_argument(
+        '--use_server_model',
+        type=lambda x: x.lower() == 'true',
+        default=False,
+        help='Enable usage of server model (default: false)',
+    )
+    parser.add_argument(
+        '--brightness_threshold',
+        type=restricted_int(0, 255),
+        default=None,
+        help='Brightness threshold',
+    )
+    parser.add_argument(
+        '--ssim_threshold',
+        type=restricted_int(0, 100),
+        default=94,
+        help='SSIM similarity threshold for initial frame filtering in Step 1 (default: 94)',
+    )
+    parser.add_argument(
+        '--subtitle_position',
+        type=str,
+        choices=['center', 'left', 'right', 'any'],
+        default='center',
+        help='Subtitle position alignment (default: center)',
+    )
+    parser.add_argument(
+        '--frames_to_skip',
+        type=restricted_int(min_val=0),
+        default=1,
+        help='Frames to skip (default: 1)',
+    )
+    parser.add_argument(
+        '--normalize_to_simplified_chinese',
+        type=lambda x: x.lower() == 'true',
+        default=True,
+        help='Normalize Traditional Chinese characters to Simplified Chinese (default: true)',
+    )
+    parser.add_argument(
+        '--post_processing',
+        type=lambda x: x.lower() == 'true',
+        default=False,
+        help='Enable post processing of subtitles (default: false)',
+    )
+    parser.add_argument(
+        '--min_subtitle_duration',
+        type=restricted_float(min_val=0.0),
+        default=0.2,
+        help='Minimum subtitle duration in seconds (default: 0.2)',
+    )
+    parser.add_argument(
+        '--ocr_image_max_width',
+        type=restricted_int(min_val=1),
+        default=720,
+        help='Maximum image width used for OCR (default: 720)',
+    )
+    parser.add_argument(
+        '--disable_stitching',
+        type=lambda x: x.lower() == 'true',
+        default=False,
+        help='Disable frame stitching for the detection pass (default: false)',
+    )
+
     parser.add_argument('--crop_x', type=int, default=None, help='(Zone 1) Crop start X')
     parser.add_argument('--crop_y', type=int, default=None, help='(Zone 1) Crop start Y')
     parser.add_argument('--crop_width', type=int, default=None, help='(Zone 1) Crop width')
@@ -139,58 +323,119 @@ def main() -> None:
     parser.add_argument('--crop_y2', type=int, default=None, help='(Zone 2) Crop start Y')
     parser.add_argument('--crop_width2', type=int, default=None, help='(Zone 2) Crop width')
     parser.add_argument('--crop_height2', type=int, default=None, help='(Zone 2) Crop height')
-    parser.add_argument('--subtitle_alignment', type=valid_alignment_name, default=None, help='(Zone 1) Subtitle alignment. Allowed: bottom-left, bottom-center, bottom-right, middle-left, middle-center, middle-right, top-left, top-center, top-right')
-    parser.add_argument('--subtitle_alignment2', type=valid_alignment_name, default=None, help='(Zone 2) Subtitle alignment. See --subtitle_alignment for allowed values.')
-    parser.add_argument('--allow_system_sleep', type=lambda x: x.lower() == 'true', default=False, help='Allow the system to sleep during processing (default: false)')
-    parser.add_argument('--save_ocr_images', type=lambda x: x.lower() == 'true', default=False, help='Save annotated detection and recognition images to disk. Recognition output is PaddleOCR only; not yet supported for Google Lens (default: false)')
-    parser.add_argument('--ocr_images_output_dir', type=valid_output_dir_path, default='ocr_images', help='Directory to save OCR images to when --save_ocr_images is enabled (default: ocr_images)')
+
+    parser.add_argument(
+        '--subtitle_alignment',
+        type=valid_alignment_name,
+        default=None,
+        help='(Zone 1) Subtitle alignment',
+    )
+    parser.add_argument(
+        '--subtitle_alignment2',
+        type=valid_alignment_name,
+        default=None,
+        help='(Zone 2) Subtitle alignment',
+    )
+    parser.add_argument(
+        '--allow_system_sleep',
+        type=lambda x: x.lower() == 'true',
+        default=False,
+        help='Allow the system to sleep during processing (default: false)',
+    )
+    parser.add_argument(
+        '--save_ocr_images',
+        type=lambda x: x.lower() == 'true',
+        default=False,
+        help='Save OCR images to disk (default: false)',
+    )
+    parser.add_argument(
+        '--ocr_images_output_dir',
+        type=valid_output_dir_path,
+        default='ocr_images',
+        help='Directory to save OCR images (default: ocr_images)',
+    )
 
     args = parser.parse_args()
 
     try:
+        if args.output is None:
+            args.output = f'subtitle.{args.subtitle_format}'
+        elif not args.output.lower().endswith(f'.{args.subtitle_format}'):
+            raise ValueError(
+                f"Output filename must end with '.{args.subtitle_format}' "
+                f"when --subtitle_format is {args.subtitle_format}."
+            )
+
         if args.ocr_engine == 'paddleocr':
             args.lang = args.lang.lower()
-            if args.lang not in (set().union(*PADDLEOCR_LANGS.values())):
-                raise ValueError(f"Unsupported language code '{args.lang}' for PaddleOCR.")
+            if args.lang not in set().union(*PADDLEOCR_LANGS.values()):
+                raise ValueError(
+                    f"Unsupported language code '{args.lang}' for PaddleOCR."
+                )
+
         if args.ocr_engine == 'google_lens' and args.lang not in GOOGLE_LENS_LANGS:
-            raise ValueError(f"Unsupported language code '{args.lang}' for Google Lens.")
+            raise ValueError(
+                f"Unsupported language code '{args.lang}' for Google Lens."
+            )
 
         if args.time_start and args.time_end:
             start_ms = utils.get_ms_from_time_str(args.time_start)
             end_ms = utils.get_ms_from_time_str(args.time_end)
             if start_ms > end_ms:
-                raise ValueError(f"Start Time ({args.time_start}) cannot be after End Time ({args.time_end}).")
+                raise ValueError(
+                    f"Start Time ({args.time_start}) cannot be after "
+                    f"End Time ({args.time_end})."
+                )
 
         crop_zones: list[dict[str, int]] = []
-        if not args.use_fullframe:
-            zone1_vars = [args.crop_x, args.crop_y, args.crop_width, args.crop_height]
 
+        if not args.use_fullframe:
+            zone1_vars = [
+                args.crop_x, args.crop_y, args.crop_width, args.crop_height
+            ]
             is_zone1_full = all(v is not None for v in zone1_vars)
             is_zone1_empty = all(v is None for v in zone1_vars)
 
             if is_zone1_full:
                 crop_zones.append({
-                    'x': args.crop_x, 'y': args.crop_y,
-                    'width': args.crop_width, 'height': args.crop_height
+                    'x': args.crop_x,
+                    'y': args.crop_y,
+                    'width': args.crop_width,
+                    'height': args.crop_height,
                 })
             elif not is_zone1_empty:
-                raise ValueError("Partial crop coordinates detected for Zone 1. You must provide ALL four: --crop_x, --crop_y, --crop_width, and --crop_height.")
+                raise ValueError(
+                    "Partial crop coordinates detected for Zone 1. "
+                    "You must provide ALL four: --crop_x, --crop_y, "
+                    "--crop_width, and --crop_height."
+                )
 
-            zone2_vars = [args.crop_x2, args.crop_y2, args.crop_width2, args.crop_height2]
-
+            zone2_vars = [
+                args.crop_x2, args.crop_y2, args.crop_width2, args.crop_height2
+            ]
             is_zone2_full = all(v is not None for v in zone2_vars)
             is_zone2_empty = all(v is None for v in zone2_vars)
 
             if is_zone2_full:
                 crop_zones.append({
-                    'x': args.crop_x2, 'y': args.crop_y2,
-                    'width': args.crop_width2, 'height': args.crop_height2
+                    'x': args.crop_x2,
+                    'y': args.crop_y2,
+                    'width': args.crop_width2,
+                    'height': args.crop_height2,
                 })
             elif not is_zone2_empty:
-                raise ValueError("Partial crop coordinates detected for Zone 2. You must provide ALL four: --crop_x2, --crop_y2, --crop_width2, and --crop_height2.")
+                raise ValueError(
+                    "Partial crop coordinates detected for Zone 2. "
+                    "You must provide ALL four: --crop_x2, --crop_y2, "
+                    "--crop_width2, and --crop_height2."
+                )
 
-        disable_wakelock = args.allow_system_sleep or utils.is_running_in_container()
-        keep_awake_manager = nullcontext() if disable_wakelock else keep.running()
+        disable_wakelock = (
+            args.allow_system_sleep or utils.is_running_in_container()
+        )
+        keep_awake_manager = (
+            nullcontext() if disable_wakelock else keep.running()
+        )
 
         with keep_awake_manager:
             save_subtitles_to_file(
@@ -217,10 +462,23 @@ def main() -> None:
                 min_subtitle_duration_sec=args.min_subtitle_duration,
                 ocr_image_max_width=args.ocr_image_max_width,
                 disable_stitching=args.disable_stitching,
-                subtitle_alignments=[args.subtitle_alignment, args.subtitle_alignment2],
+                subtitle_alignments=[
+                    args.subtitle_alignment,
+                    args.subtitle_alignment2,
+                ],
                 save_ocr_images=args.save_ocr_images,
-                ocr_images_output_dir=args.ocr_images_output_dir
+                ocr_images_output_dir=args.ocr_images_output_dir,
+                subtitle_format=args.subtitle_format,
+                preserve_position=args.preserve_position,
+                preserve_color=args.preserve_color,
+                red_white_threshold=(
+                    args.red_white_threshold_percent / 100.0
+                    if args.red_white_threshold_percent is not None
+                    else None
+                ),
+                white_protection_strength=args.white_protection_strength,
             )
+
     except ValueError as e:
         print(f"Error: {e}")
         sys.exit(1)

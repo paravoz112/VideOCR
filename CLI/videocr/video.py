@@ -16,6 +16,7 @@ import fast_ssim
 import wordninja_enhanced as wordninja
 
 from . import utils
+from .ass_color import estimate_ass_color
 from .models import PredictedFrames, PredictedSubtitle
 from .pyav_adapter import Capture, VideoDecodeError, get_video_properties
 
@@ -161,6 +162,12 @@ class Video:
             val_zone['h'] = target_h
             val_zone['crop_str'] = f"{crop_w_coded}:{crop_h}:{crop_x_coded}:{crop_y}"
             val_zone['scale_str'] = f"{target_w}:{target_h}:flags=area:threads=1"
+
+            pixel_aspect = self.sample_aspect_ratio or 1.0
+            val_zone['ass_x_offset'] = crop_x_coded * pixel_aspect
+            val_zone['ass_y_offset'] = crop_y
+            val_zone['ass_x_scale'] = (crop_w_coded * pixel_aspect) / target_w
+            val_zone['ass_y_scale'] = crop_h / target_h
 
         temp_dir = utils.create_clean_temp_dir()
 
@@ -980,7 +987,7 @@ class Video:
 
         return ''.join(srt_lines)
 
-    def _generate_subtitles(self, sim_threshold: int, max_merge_gap_sec: float, lang: str, post_processing: bool, min_subtitle_duration_sec: float, subtitle_alignments: list[str | None]) -> None:
+    def _generate_subtitles(self, sim_threshold: int, max_merge_gap_sec: float, lang: str, post_processing: bool, min_subtitle_duration_sec: float, subtitle_alignments: list[str | None], keep_zones_separate: bool = False) -> None:
         print("Generating subtitles...", flush=True)
 
         subs_zone1 = self._process_single_zone(self.pred_frames_zone1, sim_threshold, max_merge_gap_sec, lang, post_processing, min_subtitle_duration_sec)
@@ -991,12 +998,293 @@ class Video:
         elif not subs_zone1 and subs_zone2:
             self.pred_subs = subs_zone2
         elif subs_zone1 and subs_zone2:
-            if subtitle_alignments[0] != subtitle_alignments[1]:
+            if keep_zones_separate or subtitle_alignments[0] != subtitle_alignments[1]:
                 self.pred_subs = sorted(subs_zone1 + subs_zone2, key=lambda s: s.index_start)
             else:
                 self.pred_subs = self._merge_dual_zone_subtitles(subs_zone1, subs_zone2, min_subtitle_duration_sec)
         else:
             self.pred_subs = []
+
+    def _make_ass_line_frames(self, frame: PredictedFrames) -> list[PredictedFrames]:
+        """Create a separate frame record for each recognized text line."""
+        line_texts = frame.text.split('\n')
+        result: list[PredictedFrames] = []
+
+        for index, words in enumerate(frame.lines):
+            if not words:
+                continue
+
+            text = (
+                line_texts[index]
+                if len(line_texts) == len(frame.lines)
+                else ' '.join(word.text for word in words)
+            )
+            if not text.strip():
+                continue
+
+            line_frame = copy.copy(frame)
+            line_frame.lines = [words]
+            line_frame.text = text
+            line_frame.confidence = sum(word.confidence for word in words) / len(words)
+            result.append(line_frame)
+
+        return result
+
+    def _process_ass_single_zone(
+        self,
+        pred_frames: list[PredictedFrames],
+        sim_threshold: int,
+        max_merge_gap_sec: float,
+        lang: str,
+        post_processing: bool,
+        min_subtitle_duration_sec: float,
+    ) -> list[PredictedSubtitle]:
+        """Track individual text lines across OCR frames within one zone."""
+
+        def bounds(frame: PredictedFrames) -> tuple[float, float, float, float]:
+            points = [
+                point
+                for word in frame.lines[0]
+                for point in word.bounding_box
+            ]
+            return (
+                min(point[0] for point in points),
+                min(point[1] for point in points),
+                max(point[0] for point in points),
+                max(point[1] for point in points),
+            )
+
+        active: list[list[PredictedFrames]] = []
+        finished: list[list[PredictedFrames]] = []
+
+        for frame in sorted(pred_frames, key=lambda f: f.start_index):
+            current_lines = self._make_ass_line_frames(frame)
+            used_lines: set[int] = set()
+            next_active: list[list[PredictedFrames]] = []
+
+            for track in active:
+                previous = track[-1]
+                px1, py1, px2, py2 = bounds(previous)
+                pcx = (px1 + px2) / 2
+                pcy = (py1 + py2) / 2
+
+                best_index: int | None = None
+                best_distance = float("inf")
+
+                for index, candidate in enumerate(current_lines):
+                    if index in used_lines:
+                        continue
+
+                    similarity = utils.levenshtein_ratio(
+                        previous.text.replace(" ", ""),
+                        candidate.text.replace(" ", ""),
+                        sim_threshold,
+                    )
+                    if similarity < sim_threshold:
+                        continue
+
+                    x1, y1, x2, y2 = bounds(candidate)
+                    cx = (x1 + x2) / 2
+                    cy = (y1 + y2) / 2
+
+                    max_y_shift = max(8, 0.7 * max(py2 - py1, y2 - y1))
+                    max_x_shift = max(20, ((px2 - px1) + (x2 - x1)) / 2 + 10)
+
+                    if abs(cy - pcy) > max_y_shift or abs(cx - pcx) > max_x_shift:
+                        continue
+
+                    distance = (cx - pcx) ** 2 + (cy - pcy) ** 2
+                    if distance < best_distance:
+                        best_distance = distance
+                        best_index = index
+
+                if best_index is None:
+                    finished.append(track)
+                else:
+                    track.append(current_lines[best_index])
+                    used_lines.add(best_index)
+                    next_active.append(track)
+
+            for index, line in enumerate(current_lines):
+                if index not in used_lines:
+                    next_active.append([line])
+
+            active = next_active
+
+        finished.extend(active)
+
+        subtitles: list[PredictedSubtitle] = []
+        for track in finished:
+            subtitles.extend(
+                self._process_single_zone(
+                    track,
+                    sim_threshold,
+                    max_merge_gap_sec,
+                    lang,
+                    post_processing,
+                    min_subtitle_duration_sec,
+                )
+            )
+
+        return sorted(subtitles, key=lambda sub: sub.index_start)
+
+    def get_ass_subtitles(
+        self,
+        sim_threshold: int,
+        max_merge_gap_sec: float,
+        lang: str,
+        post_processing: bool,
+        min_subtitle_duration_sec: float,
+        preserve_position: bool = True,
+        preserve_color: bool = False,
+        video_path: str | None = None,
+        red_white_threshold: float | None = None,
+        white_protection_strength: float | None = None,
+    ) -> str:
+        """Generate one ASS dialogue event per tracked text line."""
+
+        def ass_time(milliseconds: float) -> str:
+            centiseconds = max(0, round(milliseconds / 10))
+            hours, remainder = divmod(centiseconds, 360000)
+            minutes, remainder = divmod(remainder, 6000)
+            seconds, centiseconds = divmod(remainder, 100)
+            return f"{hours}:{minutes:02}:{seconds:02}.{centiseconds:02}"
+
+        font_size = max(16, round(self.height * 0.04))
+        header = (
+            "[Script Info]\n"
+            "ScriptType: v4.00+\n"
+            f"PlayResX: {self.width}\n"
+            f"PlayResY: {self.height}\n"
+            "WrapStyle: 2\n"
+            "ScaledBorderAndShadow: yes\n\n"
+            "[V4+ Styles]\n"
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+            "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+            "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+            "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+            f"Style: Default,Arial,{font_size},&H00FFFFFF,&H000000FF,"
+            "&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1\n\n"
+            "[Events]\n"
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, "
+            "MarginV, Effect, Text\n"
+        )
+
+        subtitles = []
+        for frames in (self.pred_frames_zone1, self.pred_frames_zone2):
+            subtitles.extend(
+                self._process_ass_single_zone(
+                    frames,
+                    sim_threshold,
+                    max_merge_gap_sec,
+                    lang,
+                    post_processing,
+                    min_subtitle_duration_sec,
+                )
+            )
+
+        subtitles.sort(key=lambda sub: (sub.index_start, sub.zone_index))
+        events: list[str] = []
+
+        for sub in subtitles:
+            if not sub.frames:
+                continue
+
+            start_ms, end_ms = self._get_subtitle_ms_times(sub)
+            start_cs = max(0, round(start_ms / 10))
+            end_cs = max(start_cs + 1, round(end_ms / 10))
+
+            # Replace characters that could be interpreted as ASS markup.
+            text = (
+                sub.text
+                .replace("\\", "＼")
+                .replace("{", "（")
+                .replace("}", "）")
+                .replace("\n", r"\N")
+            )
+            if not text.strip():
+                continue
+
+            tags = ""
+            if preserve_position:
+                reference = max(sub.frames, key=lambda frame: frame.confidence)
+                points = [
+                    point
+                    for line in reference.lines
+                    for word in line
+                    for point in word.bounding_box
+                ]
+                if points:
+                    center_x = (min(p[0] for p in points) + max(p[0] for p in points)) / 2
+                    center_y = (min(p[1] for p in points) + max(p[1] for p in points)) / 2
+                    zone = self.validated_zones[sub.zone_index]
+
+                    x = round(zone["ass_x_offset"] + center_x * zone["ass_x_scale"])
+                    y = round(zone["ass_y_offset"] + center_y * zone["ass_y_scale"])
+                    x = max(0, min(self.width - 1, x))
+                    y = max(0, min(self.height - 1, y))
+
+                    tags = r"{\an5\pos(" + f"{x},{y}" + ")}"
+
+            if preserve_color:
+                if video_path is None:
+                    raise ValueError(
+                        "video_path is required to determine ASS text colors"
+                    )
+
+                reference = max(sub.frames, key=lambda frame: frame.confidence)
+                zone = self.validated_zones[sub.zone_index]
+                boxes: list[tuple[float, float, float, float]] = []
+
+                for line in reference.lines:
+                    for word in line:
+                        xs = [
+                            zone["ass_x_offset"] + point[0] * zone["ass_x_scale"]
+                            for point in word.bounding_box
+                        ]
+                        ys = [
+                            zone["ass_y_offset"] + point[1] * zone["ass_y_scale"]
+                            for point in word.bounding_box
+                        ]
+                        if xs and ys:
+                            boxes.append((min(xs), min(ys), max(xs), max(ys)))
+
+                source_ms = self.frame_timestamps.get(
+                    reference.start_index,
+                    start_ms + self.start_time_offset_ms,
+                )
+                color = estimate_ass_color(
+                    video_path,
+                    source_ms,
+                    boxes,
+                    self.sample_aspect_ratio or 1.0,
+                    red_white_threshold=red_white_threshold,
+                    white_protection_strength=white_protection_strength,
+                )
+
+                if color:
+                    if not color.endswith("&"):
+                        color += "&"
+                    color_tag = r"\1c" + color
+                    if tags:
+                        tags = tags[:-1] + color_tag + "}"
+                    else:
+                        tags = "{" + color_tag + "}"
+
+
+
+            events.append(
+                f"Dialogue: 0,{ass_time(start_cs * 10)},{ass_time(end_cs * 10)},"
+                f"Default,,0,0,0,,{tags}{text}\n"
+            )
+
+        return header + "".join(events)
+
+    def _process_single_zone(self, pred_frames: list[PredictedFrames], sim_threshold: int, max_merge_gap_sec: float, lang: str,
+                             post_processing: bool, min_subtitle_duration_sec: float) -> list[PredictedSubtitle]:
+        if not pred_frames:
+            return []
+
 
     def _process_single_zone(self, pred_frames: list[PredictedFrames], sim_threshold: int, max_merge_gap_sec: float, lang: str,
                              post_processing: bool, min_subtitle_duration_sec: float) -> list[PredictedSubtitle]:

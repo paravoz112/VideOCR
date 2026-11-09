@@ -180,7 +180,12 @@ def send_notification(title: str, message: str) -> None:
 
 # --- Determine VideOCR location ---
 def find_videocr_program() -> str | None:
-    """Determines the path to the videocr-cli executable (.exe or .bin)."""
+    """Find the local CLI script when running from source, otherwise the executable."""
+    if not getattr(sys, 'frozen', False):
+        cli_script = os.path.join(APP_DIR, 'CLI', 'videocr_cli.py')
+        if os.path.isfile(cli_script):
+            return cli_script
+
     program_name = 'videocr-cli'
     extension = ".exe" if sys.platform == "win32" else ".bin"
 
@@ -235,6 +240,21 @@ DEFAULT_TIME_START = "0:00"
 KEY_SEEK_STEP = 1
 CONFIG_FILE = get_config_file_path()
 CONFIG_SECTION = 'Settings'
+
+def show_personal_red_protection() -> bool:
+    """Return whether the personal red protection control should be visible."""
+    config = configparser.ConfigParser()
+    try:
+        config.read(CONFIG_FILE, encoding='utf-8')
+        return config.getboolean(
+            CONFIG_SECTION,
+            'show_personal_red_protection',
+            fallback=False,
+        )
+    except (OSError, configparser.Error, ValueError):
+        return False
+
+
 try:
     DEFAULT_DOCUMENTS_DIR = str(pathlib.Path.home() / "Documents")
 except Exception:
@@ -594,6 +614,17 @@ def update_gui_text(window: sg.Window, is_paused: bool = False) -> None:
         '--brightness_threshold': {'tooltip': 'tip_brightness'},
         '-LBL-SSIM-': {'text': 'lbl_ssim', 'tooltip': 'tip_ssim'},
         '--ssim_threshold': {'tooltip': 'tip_ssim'},
+
+        '-LBL-SUBTITLE-FORMAT-': {'text': 'lbl_subtitle_format'},
+        '-ASS_POSITION-': {'text': 'chk_ass_position', 'tooltip': 'tip_ass_position'},
+        '-ASS_COLOR-': {'text': 'chk_ass_color', 'tooltip': 'tip_ass_color'},
+        '-WHITE_PROTECTION-': {'text': 'chk_white_protection', 'tooltip': 'tip_white_protection'},
+        '-LBL-WHITE-PROTECTION-STRENGTH-': {
+            'text': 'lbl_white_protection_strength',
+            'tooltip': 'tip_white_protection',
+        },
+        '-WHITE_PROTECTION_STRENGTH-': {'tooltip': 'tip_white_protection'},
+
         '-LBL-OCR_WIDTH-': {'text': 'lbl_ocr_width', 'tooltip': 'tip_ocr_width'},
         '--ocr_image_max_width': {'tooltip': 'tip_ocr_width'},
         '--disable_stitching': {'text': 'chk_disable_stitching', 'tooltip': 'tip_disable_stitching'},
@@ -1077,6 +1108,9 @@ def get_default_settings() -> dict[str, Any]:
     '--language': 'en',
     '-OCR_ENGINE_COMBO-': DEFAULT_OCR_ENGINE,
     '-LANG_COMBO-': DEFAULT_SUBTITLE_LANGUAGE,
+    '-SUBTITLE_FORMAT-': 'srt',
+    '-ASS_POSITION-': True,
+    '-ASS_COLOR-': False,
     '-SUBTITLE_POS_COMBO-': DEFAULT_INTERNAL_SUBTITLE_POSITION,
     '-POST_ACTION-': 0,
     '--time_start': DEFAULT_TIME_START,
@@ -1086,6 +1120,8 @@ def get_default_settings() -> dict[str, Any]:
     '--max_merge_gap': str(DEFAULT_MAX_MERGE_GAP),
     '--brightness_threshold': '',
     '--ssim_threshold': str(DEFAULT_SSIM_THRESHOLD),
+    '-WHITE_PROTECTION-': False,
+    '-WHITE_PROTECTION_STRENGTH-': '50',
     '--ocr_image_max_width': str(DEFAULT_OCR_IMAGE_MAX_WIDTH),
     '--disable_stitching': False,
     '--frames_to_skip': str(DEFAULT_FRAMES_TO_SKIP),
@@ -1261,7 +1297,10 @@ def reset_settings_to_default(window: sg.Window, keys: list[str]) -> bool:
 def save_settings(window: sg.Window, values: dict[str, Any]) -> None:
     """Saves current settings from GUI elements to the config file."""
     config = configparser.ConfigParser()
-    config.add_section(CONFIG_SECTION)
+    if os.path.exists(CONFIG_FILE):
+        config.read(CONFIG_FILE)
+    if not config.has_section(CONFIG_SECTION):
+        config.add_section(CONFIG_SECTION)
 
     settings_to_save = {key: values.get(key, get_default_settings().get(key)) for key in get_default_settings() if key != '--saved_crop_boxes'}
 
@@ -1354,6 +1393,9 @@ def load_settings(window: sg.Window) -> None:
 
                 settings_to_load = [
                     ('-LANG_COMBO-', 'combo_lang'),
+                    ('-SUBTITLE_FORMAT-', 'input'),
+                    ('-ASS_POSITION-', 'checkbox'),
+                    ('-ASS_COLOR-', 'checkbox'),
                     ('--time_start', 'input'),
                     ('--time_end', 'input'),
                     ('--conf_threshold', 'input'),
@@ -1361,6 +1403,8 @@ def load_settings(window: sg.Window) -> None:
                     ('--max_merge_gap', 'input'),
                     ('--brightness_threshold', 'input'),
                     ('--ssim_threshold', 'input'),
+                    ('-WHITE_PROTECTION-', 'checkbox'),
+                    ('-WHITE_PROTECTION_STRENGTH-', 'input'),
                     ('--ocr_image_max_width', 'input'),
                     ('--disable_stitching', 'checkbox'),
                     ('--frames_to_skip', 'input'),
@@ -1415,6 +1459,21 @@ def load_settings(window: sg.Window) -> None:
             current_gui_values = window.read(timeout=0)[1]
             update_alignment_controls(window, current_gui_values)
             update_ocr_images_controls(window, current_gui_values)
+
+            is_ass = current_gui_values.get('-SUBTITLE_FORMAT-', 'srt') == 'ass'
+            keep_color = current_gui_values.get('-ASS_COLOR-', False)
+            white_protection = current_gui_values.get('-WHITE_PROTECTION-', False)
+
+            window['-ASS_POSITION-'].update(disabled=not is_ass)
+            window['-ASS_COLOR-'].update(disabled=not is_ass)
+
+            window['-WHITE_PROTECTION-'].update(
+                disabled=not (is_ass and keep_color)
+            )
+            window['-WHITE_PROTECTION_STRENGTH-'].update(
+                disabled=not (is_ass and keep_color and white_protection)
+            )
+
             save_settings(window, current_gui_values)
 
         except configparser.Error as e:
@@ -1467,11 +1526,14 @@ def generate_output_path(video_path: str, values: dict[str, Any], default_dir: s
         paddle_code = paddle_abbr_lookup.get(selected_lang_name, 'en')
         iso_code = PADDLE_TO_ISO_MAP.get(paddle_code, paddle_code)
 
-    base_output_path = output_dir / f"{video_filename_stem}.{iso_code}.srt"
+    selected_format = str(values.get('-SUBTITLE_FORMAT-', 'srt')).strip().lower()
+    extension = 'ass' if selected_format == 'ass' else 'srt'
+
+    base_output_path = output_dir / f"{video_filename_stem}.{iso_code}.{extension}"
     output_path = base_output_path
     counter = 1
     while output_path.exists():
-        output_path = output_dir / f"{video_filename_stem}({counter}).{iso_code}.srt"
+        output_path = output_dir / f"{video_filename_stem}({counter}).{iso_code}.{extension}"
         counter += 1
 
     return output_path
@@ -1912,6 +1974,25 @@ def get_processing_args(values: dict[str, Any], window: sg.Window) -> tuple[dict
         except ValueError:
             errors.append(error_format.format(name, article, type_name, range_str))
 
+    if (
+        values.get('-SUBTITLE_FORMAT-', 'srt') == 'ass'
+        and values.get('-ASS_COLOR-', False)
+        and values.get('-WHITE_PROTECTION-', False)
+    ):
+        strength_text = str(
+            values.get('-WHITE_PROTECTION_STRENGTH-', '')
+        ).strip()
+
+        try:
+            strength = float(strength_text)
+            if not 0 <= strength <= 100:
+                raise ValueError
+        except ValueError:
+            errors.append(
+                "White text protection strength must be a number "
+                "between 0 and 100."
+            )
+
     if errors:
         return None, errors
 
@@ -1980,6 +2061,20 @@ def get_processing_args(values: dict[str, Any], window: sg.Window) -> tuple[dict
     if not out_path and video_path:
         out_path = generate_output_path(video_path, values)
     args['output'] = str(out_path)
+    subtitle_format = values.get('-SUBTITLE_FORMAT-', 'srt')
+    args['subtitle_format'] = subtitle_format
+
+    if subtitle_format == 'ass':
+        args['preserve_position'] = bool(values.get('-ASS_POSITION-', True))
+        args['preserve_color'] = bool(values.get('-ASS_COLOR-', False))
+
+        if args['preserve_color'] and show_personal_red_protection():
+            percent = str(values.get('-RED_WHITE_THRESHOLD_PERCENT-', '30')).strip()
+            args['red_white_threshold_percent'] = percent or '30'
+
+        if args['preserve_color'] and values.get('-WHITE_PROTECTION-', False):
+            strength = str(values.get('-WHITE_PROTECTION_STRENGTH-', '50')).strip()
+            args['white_protection_strength'] = strength
 
     return args, None
 
@@ -1999,7 +2094,8 @@ def get_valid_brightness_threshold(value: Any) -> int | None:
 
 def build_cli_command(args_dict: dict[str, Any]) -> list[str]:
     """Builds the videocr-cli command-line argument list from a processing args dict."""
-    command = [cast(str, VIDEOCR_PATH)]
+    cli_path = cast(str, VIDEOCR_PATH)
+    command = [sys.executable, cli_path] if cli_path.lower().endswith('.py') else [cli_path]
 
     for key, value in args_dict.items():
         if value is not None and value != '':
@@ -2551,6 +2647,25 @@ tab1_content = [
             sg.Combo(OCR_ENGINES, default_value=DEFAULT_OCR_ENGINE, key="-OCR_ENGINE_COMBO-", size=(38, 1), readonly=True, enable_events=True, expand_x=True), VerticalStrut()],
             [sg.Text("Subtitle Language:", size=(17, 1), key='-LBL-SUB_LANG-'),
             sg.Combo(paddle_display_names, default_value=DEFAULT_SUBTITLE_LANGUAGE, key="-LANG_COMBO-", size=(38, 1), readonly=True, enable_events=True, expand_x=True), VerticalStrut()],
+            [sg.Text("Subtitle Format:", size=(17, 1), key="-LBL-SUBTITLE-FORMAT-"),
+            sg.Combo(['srt', 'ass'], default_value='srt', key='-SUBTITLE_FORMAT-', size=(38, 1), readonly=True, enable_events=True, expand_x=True), VerticalStrut()],
+            [sg.Text("ASS Options:", size=(17, 1)),
+            sg.Checkbox("Keep position", default=True, key="-ASS_POSITION-", disabled=True, enable_events=True),
+            sg.Checkbox("Keep color", default=False, key="-ASS_COLOR-", disabled=True, enable_events=True), VerticalStrut()],
+            [sg.Column(
+                [[
+                    sg.Text("Red protection, %:", size=(17, 1)),
+                    sg.Input(
+                        "30",
+                        key="-RED_WHITE_THRESHOLD_PERCENT-",
+                        size=(8, 1),
+                        disabled=True,
+                    ),
+                ]],
+                key="-PERSONAL_RED_PROTECTION_ROW-",
+                visible=show_personal_red_protection(),
+                pad=(0, 0),
+            )],
             [sg.Text("Subtitle Position:", size=(17, 1), key='-LBL-SUB_POS-'),
             sg.Combo([], key="-SUBTITLE_POS_COMBO-", size=(38, 4), readonly=True, enable_events=True, expand_x=True), VerticalStrut()],
         ], pad=(0, None)),
@@ -2632,6 +2747,14 @@ tab2_content = [
      sg.Input("", key="--brightness_threshold", size=(10, 1), enable_events=True, right_click_menu=make_reset_menu("--brightness_threshold"))],
     [sg.Text("SSIM Threshold (0-100):", size=(38, 1), key='-LBL-SSIM-'),
      sg.Input(DEFAULT_SSIM_THRESHOLD, key="--ssim_threshold", size=(10, 1), enable_events=True, right_click_menu=make_reset_menu("--ssim_threshold"))],
+
+    [sg.Checkbox("White text protection", default=False,
+                 key="-WHITE_PROTECTION-", disabled=True, enable_events=True)],
+    [sg.Text("Protection strength (0-100):", size=(38, 1),
+             key="-LBL-WHITE-PROTECTION-STRENGTH-"),
+     sg.Input("50", key="-WHITE_PROTECTION_STRENGTH-", size=(10, 1),
+              disabled=True, enable_events=True)],
+
     [sg.Text("Max OCR Image Width (pixel):", size=(38, 1), key='-LBL-OCR_WIDTH-'),
      sg.Input(DEFAULT_OCR_IMAGE_MAX_WIDTH, key="--ocr_image_max_width", size=(10, 1), enable_events=True, right_click_menu=make_reset_menu("--ocr_image_max_width"))],
     [sg.Checkbox("Disable Frame Stitching", default=False, key="--disable_stitching", enable_events=True, right_click_menu=make_reset_menu("--disable_stitching"))],
@@ -3070,6 +3193,11 @@ KEYS_TO_AUTOSAVE = [
     '-UI_LANG_COMBO-',
     '-OCR_ENGINE_COMBO-',
     '-LANG_COMBO-',
+    '-SUBTITLE_FORMAT-',
+    '-ASS_POSITION-',
+    '-ASS_COLOR-',
+    '-WHITE_PROTECTION-',
+    '-WHITE_PROTECTION_STRENGTH-',
     '-SUBTITLE_POS_COMBO-',
     '--time_start',
     '--time_end',
@@ -3236,6 +3364,52 @@ while True:
                 output_path = generate_output_path(video_path, values)
                 window['--output'].update(str(output_path))
 
+        elif event == '-SUBTITLE_FORMAT-':
+            is_ass = values.get('-SUBTITLE_FORMAT-', 'srt') == 'ass'
+            keep_color = values.get('-ASS_COLOR-', False)
+            white_protection = values.get('-WHITE_PROTECTION-', False)
+
+            window['-ASS_POSITION-'].update(disabled=not is_ass)
+            window['-ASS_COLOR-'].update(disabled=not is_ass)
+
+            window['-RED_WHITE_THRESHOLD_PERCENT-'].update(
+                disabled=not (is_ass and keep_color)
+            )
+            window['-WHITE_PROTECTION-'].update(
+                disabled=not (is_ass and keep_color)
+            )
+            window['-WHITE_PROTECTION_STRENGTH-'].update(
+                disabled=not (is_ass and keep_color and white_protection)
+            )
+
+            if video_path:
+                output_path = generate_output_path(video_path, values)
+                window['--output'].update(str(output_path))
+
+        elif event == '-ASS_COLOR-':
+            is_ass = values.get('-SUBTITLE_FORMAT-', 'srt') == 'ass'
+            keep_color = values.get('-ASS_COLOR-', False)
+            white_protection = values.get('-WHITE_PROTECTION-', False)
+
+            window['-RED_WHITE_THRESHOLD_PERCENT-'].update(
+                disabled=not (is_ass and keep_color)
+            )
+            window['-WHITE_PROTECTION-'].update(
+                disabled=not (is_ass and keep_color)
+            )
+            window['-WHITE_PROTECTION_STRENGTH-'].update(
+                disabled=not (is_ass and keep_color and white_protection)
+            )
+
+        elif event == '-WHITE_PROTECTION-':
+            is_ass = values.get('-SUBTITLE_FORMAT-', 'srt') == 'ass'
+            keep_color = values.get('-ASS_COLOR-', False)
+            white_protection = values.get('-WHITE_PROTECTION-', False)
+
+            window['-WHITE_PROTECTION_STRENGTH-'].update(
+                disabled=not (is_ass and keep_color and white_protection)
+            )
+
         elif event == '-LANG_COMBO-':
             if video_path:
                 current_out = values.get('--output', '')
@@ -3255,21 +3429,30 @@ while True:
                         set(PADDLE_TO_ISO_MAP.values()),
                         set(lens_abbr_lookup.values())
                     )
+                    extension = (
+                        '.ass'
+                        if values.get('-SUBTITLE_FORMAT-', 'srt') == 'ass'
+                        else '.srt'
+                    )
                     base_name = None
 
-                    if len(p.suffixes) >= 2 and p.suffixes[-1].lower() == '.srt' and p.suffixes[-2][1:] in known_codes:
+                    if (
+                        len(p.suffixes) >= 2
+                        and p.suffixes[-1].lower() == extension
+                        and p.suffixes[-2][1:] in known_codes
+                    ):
                         base_name = p.name[:-(len(p.suffixes[-2]) + len(p.suffixes[-1]))]
 
-                    elif p.suffix.lower() == '.srt':
+                    elif p.suffix.lower() == extension:
                         base_name = p.stem
 
                     if base_name:
-                        new_filename = f"{base_name}.{iso_code}.srt"
+                        new_filename = f"{base_name}.{iso_code}{extension}"
                         new_out = directory / new_filename
 
                         counter = 1
                         while new_out.exists():
-                            new_filename = f"{base_name}({counter}).{iso_code}.srt"
+                            new_filename = f"{base_name}({counter}).{iso_code}{extension}"
                             new_out = directory / new_filename
                             counter += 1
 
@@ -3473,13 +3656,19 @@ while True:
         output_file_path = pathlib.Path(output_path)
 
         save_as_title = LANG.get('save_as_title', "Save As")
-        save_as_filter_name = LANG.get('save_as_filter_name', "SubRip Subtitle")
+        selected_format = values.get('-SUBTITLE_FORMAT-', 'srt')
+        extension = '.ass' if selected_format == 'ass' else '.srt'
+        save_as_filter_name = (
+            "ASS Subtitle"
+            if selected_format == 'ass'
+            else LANG.get('save_as_filter_name', "SubRip Subtitle")
+        )
         save_as_all_files = LANG.get('save_as_all_files', "All Files")
 
         # Usage of tkinter.tkFileDialog instead of sg.popup_get_file because of the window placement on screen
         filename_chosen = sg.tk.filedialog.asksaveasfilename(
-            defaultextension='srt',
-            filetypes=((save_as_filter_name, "*.srt"), (save_as_all_files, "*.*")),
+            defaultextension=extension,
+            filetypes=((save_as_filter_name, f"*{extension}"), (save_as_all_files, "*.*")),
             initialdir=output_file_path.parent,
             initialfile=output_file_path.stem,
             parent=window.TKroot,

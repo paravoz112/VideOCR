@@ -7,13 +7,20 @@ from .video import Video
 
 
 def save_subtitles_to_file(
-        video_path: str, file_path: str = 'subtitle.srt', ocr_engine: str = 'google_lens', lang: str = 'en',
-        time_start: str = '0:00', time_end: str = '', conf_threshold: int = 75, sim_threshold: int = 80, max_merge_gap_sec: float = 0.1,
-        use_fullframe: bool = False, use_gpu: bool = False, use_angle_cls: bool = False, use_server_model: bool = False,
-        brightness_threshold: int | None = None, ssim_threshold: int = 94, subtitle_position: str = "center", frames_to_skip: int = 1,
-        crop_zones: list[dict[str, int]] | None = None, ocr_image_max_width: int = 720, disable_stitching: bool = False, post_processing: bool = False,
-        min_subtitle_duration_sec: float = 0.2, normalize_to_simplified_chinese: bool = True, subtitle_alignments: list[str | None] | None = None,
-        save_ocr_images: bool = False, ocr_images_output_dir: str = 'ocr_images') -> None:
+    video_path: str, file_path: str = 'subtitle.srt', ocr_engine: str = 'google_lens', lang: str = 'en',
+    time_start: str = '0:00', time_end: str = '', conf_threshold: int = 75, sim_threshold: int = 80, max_merge_gap_sec: float = 0.1,
+    use_fullframe: bool = False, use_gpu: bool = False, use_angle_cls: bool = False, use_server_model: bool = False,
+    brightness_threshold: int | None = None, ssim_threshold: int = 94, subtitle_position: str = "center", frames_to_skip: int = 1,
+    crop_zones: list[dict[str, int]] | None = None, ocr_image_max_width: int = 720, disable_stitching: bool = False, post_processing: bool = False,
+    min_subtitle_duration_sec: float = 0.2, normalize_to_simplified_chinese: bool = True, subtitle_alignments: list[str | None] | None = None,
+    save_ocr_images: bool = False, ocr_images_output_dir: str = 'ocr_images',
+    subtitle_format: str = 'srt', preserve_position: bool = True,
+    preserve_color: bool = False,
+    red_white_threshold: float | None = None,
+    white_protection_strength: float | None = None,
+) -> None:
+    if subtitle_format not in ('srt', 'ass'):
+        raise ValueError(f"Unknown subtitle format: {subtitle_format}")
 
     if crop_zones is None:
         crop_zones = []
@@ -24,6 +31,7 @@ def save_subtitles_to_file(
         subtitle_alignments.append(None)
 
     paddleocr_path = utils.find_executable("paddleocr")
+
     try:
         utils.perform_hardware_check(paddleocr_path, use_gpu)
     except SystemExit as e:
@@ -37,8 +45,8 @@ def save_subtitles_to_file(
         det_model_dir, rec_model_dir, cls_model_dir = utils.resolve_model_dirs('en', use_server_model)
 
     google_lens_path = utils.find_executable("chrome-lens")
-
     v = Video(video_path, paddleocr_path, det_model_dir, rec_model_dir, cls_model_dir, google_lens_path)
+
     try:
         v.run_ocr(
             use_gpu, ocr_engine, lang, use_angle_cls, time_start, time_end, conf_threshold,
@@ -49,7 +57,29 @@ def save_subtitles_to_file(
     except Exception as e:
         print(f"\nError: {e}", flush=True)
         sys.exit(1)
-    subtitles = v.get_subtitles(sim_threshold, max_merge_gap_sec, lang, post_processing, min_subtitle_duration_sec, subtitle_alignments)
+
+    if subtitle_format == 'ass':
+        subtitles = v.get_ass_subtitles(
+            sim_threshold,
+            max_merge_gap_sec,
+            lang,
+            post_processing,
+            min_subtitle_duration_sec,
+            preserve_position,
+            preserve_color,
+            video_path,
+            red_white_threshold=red_white_threshold,
+            white_protection_strength=white_protection_strength,
+        )
+    else:
+        subtitles = v.get_subtitles(
+            sim_threshold,
+            max_merge_gap_sec,
+            lang,
+            post_processing,
+            min_subtitle_duration_sec,
+            subtitle_alignments,
+        )
 
     with open(file_path, 'w+', encoding='utf-8') as f:
         f.write(subtitles)

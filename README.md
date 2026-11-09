@@ -11,6 +11,21 @@ English | [中文](https://github.com/timminator/VideOCR/blob/master/README_ch.m
 
 <br>
 
+## About this fork
+
+This repository is a fork of [timminator/VideOCR](https://github.com/timminator/VideOCR). It adds experimental ASS subtitle export while retaining SRT output.
+
+ASS options include:
+
+- **Keep position:** approximately place each recognized text line where it appeared in the video.
+- **Keep color:** estimate the text color from the video. Results can be inaccurate, especially on complex backgrounds.
+- **White text protection:** optionally reduce cases where a colored background is mistaken for white text. Higher values increase protection but may turn colored text white. At 100, the general rule changes detected colors to white; an explicitly configured personal red threshold takes precedence for red.
+
+White text protection is disabled by default. The ASS options are available when ASS output is selected. Outline color is not separately detected.
+
+**Build status:** The modified source has been tested on selected video excerpts. A packaged release of this fork has not yet been verified. The releases, Docker images, and setup instructions below refer to the original project unless explicitly stated otherwise; they may not include this fork's changes.
+
+
 ## ℹ About
 
 Extract hardcoded (burned-in) subtitles from videos via a simple-to-use GUI. VideOCR supports both 100% local processing utilizing the **[PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)** engine, as well as a hybrid cloud-based approach using **Google Lens** for highly accurate text recognition. Everything can be easily configured via a few clicks.
